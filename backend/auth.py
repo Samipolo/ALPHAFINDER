@@ -2,6 +2,7 @@
 dependency, and the auth gate middleware."""
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse as _StarletteJSONResponse
 
 from db import SessionLocal, User, UserSession, get_db
+
+_logger = logging.getLogger("alphafinder.auth")
 
 ADMIN_EMAIL = "akisami24@gmail.com"
 SESSION_COOKIE = "af_session"
@@ -99,6 +102,7 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         token = request.cookies.get(SESSION_COOKIE)
         if not token:
+            _logger.warning("[AUTH] 401 no-cookie path=%s ip=%s ua=%s", path, _client_ip(request), request.headers.get("user-agent", "")[:120])
             return _StarletteJSONResponse({"error": "authentication required"}, status_code=401)
         db = SessionLocal()
         try:
@@ -108,6 +112,7 @@ class AuthGateMiddleware(BaseHTTPMiddleware):
                 .first()
             )
             if not sess:
+                _logger.warning("[AUTH] 401 session-not-found-or-revoked path=%s token_prefix=%s ip=%s ua=%s", path, token[:8], _client_ip(request), request.headers.get("user-agent", "")[:120])
                 return _StarletteJSONResponse({"error": "authentication required"}, status_code=401)
             sess.last_seen_at = datetime.now(timezone.utc)
             db.commit()

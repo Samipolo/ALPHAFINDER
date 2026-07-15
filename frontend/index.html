@@ -4367,13 +4367,22 @@
     // ═══════════════════════════════════════════════
     //  CONSTANTS & CONFIG
     // ═══════════════════════════════════════════════
-    const API_BASES = [...new Set([
-      window.location.origin && window.location.origin !== "null" && window.location.origin !== "file://"
-        ? `${window.location.origin}/api`
-        : null,
-      "http://127.0.0.1:8000/api",
-      "http://localhost:8000/api",
-    ].filter(Boolean))];
+    // A deployed origin (https://alphafinder.onrender.com, etc.) is authoritative
+    // and used exclusively -- falling through to localhost:8000 after a real
+    // origin failure would silently query an unrelated local server (which has
+    // its own separate session cookie) and misreport a 401 as "your session
+    // ended", bouncing a legitimately signed-in user back to the login gate.
+    // The localhost fallbacks only make sense when the page has no real origin
+    // at all (opened as a local file) or is itself being served from localhost.
+    const _hasRealOrigin = window.location.origin && window.location.origin !== "null" && window.location.origin !== "file://";
+    const _isLocalHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+    const API_BASES = _hasRealOrigin && !_isLocalHost
+      ? [`${window.location.origin}/api`]
+      : [...new Set([
+          _hasRealOrigin ? `${window.location.origin}/api` : null,
+          "http://127.0.0.1:8000/api",
+          "http://localhost:8000/api",
+        ].filter(Boolean))];
     const REQUEST_TIMEOUT_MS = 60000;
     const MAX_LOAD_ATTEMPTS = 9;
     const FIELDS = ["GDP", "mPMI", "sPMI", "Retail Sales", "Consumer Conf", "CPI", "PPI", "PCE", "Interest Rates", "NFP", "Unemployment Rate", "Unemployment Claims", "ADP"];
@@ -4468,12 +4477,32 @@ let timerID, timerSec = autoRefreshSec;
       return fetch(url, { credentials: "same-origin", ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
     }
 
+    let _authRecheckInFlight = null;
+    // A single background endpoint returning 401 (a transient DB hiccup, a
+    // cold-start race, one flaky route) is not proof the session is gone --
+    // only /api/auth/me is authoritative. Without this confirmation step, one
+    // bad response among the many concurrent loadAll() fetches was enough to
+    // wipe a perfectly valid session and bounce the user back to the login
+    // gate seconds after they signed in.
+    function confirmSessionLost() {
+      if (!_authRecheckInFlight) {
+        _authRecheckInFlight = fetchWithTimeout("/api/auth/me", {}, 10000)
+          .then((r) => !r.ok)
+          .catch(() => false)
+          .finally(() => { _authRecheckInFlight = null; });
+      }
+      return _authRecheckInFlight;
+    }
+
     async function fetchJsonFromBases(path) {
       let lastError = null;
       for (const base of API_BASES) {
         try {
           const res = await fetchWithTimeout(base + path, {});
-          if (res.status === 401 && !path.startsWith("/auth/")) { showAuthGate("Your session ended — sign in again to continue."); throw new Error("HTTP 401"); }
+          if (res.status === 401 && !path.startsWith("/auth/")) {
+            if (await confirmSessionLost()) showAuthGate("Your session ended — sign in again to continue.");
+            throw new Error("HTTP 401");
+          }
           if (!res.ok) throw new Error("HTTP " + res.status);
           return { base, data: await res.json() };
         } catch (err) {
