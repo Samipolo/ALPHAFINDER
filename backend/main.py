@@ -7,6 +7,7 @@ Auto-refresh: All data sources are refreshed every 5 minutes in the background.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import re
@@ -127,10 +128,23 @@ def _load_persisted_payload() -> dict | None:
     return None
 
 
+def _sanitize_json(obj):
+    """Recursively replace NaN/Infinity floats with None so Starlette's strict
+    json.dumps(allow_nan=False) never raises on a stray value from live data."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 def _rebuild_master_payload() -> dict | None:
     global _payload_cache, _payload_ts
     try:
         payload = _build_master_payload()
+        payload = _sanitize_json(payload)
     except Exception as exc:
         _logger.error(f"[PAYLOAD] rebuild failed: {exc}")
         return None
