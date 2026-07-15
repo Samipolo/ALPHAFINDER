@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.aionrs/
+.playwright-mcp/
+*.jpeg
+*.png
+backend/cache/
+.claude/settings.local.json
