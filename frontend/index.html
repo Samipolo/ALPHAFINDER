@@ -117,6 +117,12 @@
       display: flex;
       align-items: center;
       gap: 10px;
+      min-width: 180px;
+      flex-shrink: 1;
+    }
+
+    .logo>div:last-child {
+      min-width: 0;
     }
 
     .lmark {
@@ -139,6 +145,9 @@
       font-family: 'Syne', sans-serif;
       font-weight: 800;
       font-size: 15px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .ltag {
@@ -147,6 +156,9 @@
       letter-spacing: 2px;
       text-transform: uppercase;
       margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .hcenter {
@@ -186,6 +198,14 @@
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+
+    #userBadge {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: inline-block;
     }
 
     .hbadge {
@@ -3437,7 +3457,21 @@
     /* Tablet / small laptop */
     @media (max-width: 980px) {
       .pane { padding: 16px 14px; }
-      .hdr { flex-wrap: wrap; row-gap: 8px; padding: 8px 14px; }
+      /* Header no longer has a fixed height on mobile: its content wraps onto
+         several rows (logo / user badge+refresh / ticker), so height must be
+         auto to actually contain them — a fixed height here was the root cause
+         of the header overlapping the Live Sources bar below it. Sticky
+         positioning is dropped too since a multi-row header has no single
+         "top" offset that stays correct as content reflows. */
+      .hdr {
+        flex-wrap: wrap; row-gap: 8px; padding: 10px 14px;
+        height: auto; min-height: 54px;
+        position: static; top: auto;
+      }
+      .hright {
+        flex-wrap: wrap; row-gap: 6px; width: 100%;
+        justify-content: flex-end;
+      }
       .hcenter {
         order: 3; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
         justify-content: flex-start; padding-bottom: 2px;
@@ -3446,6 +3480,8 @@
       .mpill { flex-shrink: 0; }
       .sbar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
       .sbar::-webkit-scrollbar { height: 0; }
+      .tabs-wrap { position: static; top: auto; }
+      #userBadge { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
       #tvAdv { height: 540px !important; }
       .qgrid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     }
