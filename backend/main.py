@@ -1343,10 +1343,14 @@ def api_all():
         cached = dict(cached)
         cached["cache_age_sec"] = round(age, 1) if age is not None else None
         return JSONResponse(cached)
-    payload = _rebuild_master_payload()
-    if payload is None:
-        return JSONResponse({"status": "error", "error": "payload build failed"}, status_code=500)
-    return JSONResponse(payload)
+    # No cached payload yet (fresh cold start / just-deployed instance). The background
+    # refresh thread is already building it (started at app startup) — building it again
+    # synchronously here would block this request past Render's proxy timeout and return
+    # a bare 500. Return fast instead; the frontend already retries with backoff.
+    return JSONResponse(
+        {"status": "warming_up", "message": "Initial data build in progress — retry shortly."},
+        status_code=503,
+    )
 
 
 # ── v4 Individual API Endpoints ──

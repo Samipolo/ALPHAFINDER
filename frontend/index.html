@@ -4135,7 +4135,7 @@
       "http://localhost:8000/api",
     ].filter(Boolean))];
     const REQUEST_TIMEOUT_MS = 60000;
-    const MAX_LOAD_ATTEMPTS = 4;
+    const MAX_LOAD_ATTEMPTS = 9;
     const FIELDS = ["GDP", "mPMI", "sPMI", "Retail Sales", "Consumer Conf", "CPI", "PPI", "PCE", "Interest Rates", "NFP", "Unemployment Rate", "Unemployment Claims", "ADP"];
     const FLAGS = { USD: "🇺🇸", EUR: "🇪🇺", GBP: "🇬🇧", JPY: "🇯🇵", AUD: "🇦🇺", NZD: "🇳🇿", CAD: "🇨🇦", CHF: "🇨🇭" };
     const SEASONALITY_SYMBOLS = [
@@ -4246,7 +4246,10 @@ let timerID, timerSec = autoRefreshSec;
       if (loadRetryTimer) { clearTimeout(loadRetryTimer); loadRetryTimer = null; }
       if (loadAttempt >= MAX_LOAD_ATTEMPTS) return;
       const delay = Math.min(3000 * loadAttempt, 12000);
-      document.getElementById("lastUpd").textContent = `retrying in ${Math.ceil(delay / 1000)}s`;
+      const warming = /503|warming/i.test(reason || "");
+      document.getElementById("lastUpd").textContent = warming
+        ? `server waking up — retrying in ${Math.ceil(delay / 1000)}s`
+        : `retrying in ${Math.ceil(delay / 1000)}s`;
       loadRetryTimer = setTimeout(() => loadAll(true), delay);
     }
     function sourceState(key) {
