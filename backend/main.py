@@ -98,7 +98,7 @@ from services.liquidity_monitor import fetch_liquidity_monitor
 from services.real_rates_monitor import fetch_real_rates_monitor
 from services.lse_provider import fetch_lse_provider
 
-from db import User, UserSession, get_db, init_db
+from db import SessionLocal, User, UserSession, get_db, init_db
 from auth import (
     ADMIN_EMAIL,
     AuthGateMiddleware,
@@ -268,6 +268,31 @@ async def lifespan(app: FastAPI):
 
     init_db()
     _logger.info("[STARTUP] Auth database ready")
+
+    # One-time recovery hatch: set ADMIN_RESET_PASSWORD in the Render Environment
+    # tab to (re)create/repair the admin account with a known password, since the
+    # free tier has no Shell access for direct DB fixes. REMOVE the env var again
+    # after logging in once — it resets the admin password on every restart
+    # (including free-tier spin-down/wake cycles) for as long as it stays set.
+    _reset_pw = os.environ.get("ADMIN_RESET_PASSWORD", "").strip()
+    if _reset_pw:
+        _db = SessionLocal()
+        try:
+            _u = _db.query(User).filter(User.email == ADMIN_EMAIL.lower()).first()
+            if _u:
+                _u.password_hash = hash_password(_reset_pw)
+                _u.is_admin = True
+                _db.commit()
+                _logger.info("[STARTUP] ADMIN_RESET_PASSWORD set: admin password reset. REMOVE the env var now.")
+            else:
+                _u = User(email=ADMIN_EMAIL.lower(), password_hash=hash_password(_reset_pw), is_admin=True)
+                _db.add(_u)
+                _db.commit()
+                _logger.info("[STARTUP] ADMIN_RESET_PASSWORD set: admin account created. REMOVE the env var now.")
+        except Exception as _exc:
+            _logger.error(f"[STARTUP] ADMIN_RESET_PASSWORD handling failed: {_exc}")
+        finally:
+            _db.close()
 
     # Invalidate stale COT cache on startup so we always get fresh data
     global _payload_cache, _payload_ts
