@@ -22,8 +22,31 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse as _StarletteJSONResponse
 from fastapi.staticfiles import StaticFiles
+
+
+def _sanitize_json(obj):
+    """Recursively replace NaN/Infinity floats with None so Starlette's strict
+    json.dumps(allow_nan=False) never raises on a stray value from live data
+    (e.g. a 0/0 division inside a pandas/numpy computation)."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
+class JSONResponse(_StarletteJSONResponse):
+    """Drop-in replacement for fastapi.responses.JSONResponse that sanitizes
+    NaN/Infinity out of the payload before encoding, applied everywhere in
+    this file since every endpoint constructs JSONResponse directly."""
+
+    def render(self, content) -> bytes:
+        return super().render(_sanitize_json(content))
 
 # Ensure the backend directory is importable when the app is launched from the repo root.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -127,17 +150,6 @@ def _load_persisted_payload() -> dict | None:
         _logger.warning(f"[PAYLOAD] load failed: {exc}")
     return None
 
-
-def _sanitize_json(obj):
-    """Recursively replace NaN/Infinity floats with None so Starlette's strict
-    json.dumps(allow_nan=False) never raises on a stray value from live data."""
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
-    if isinstance(obj, dict):
-        return {k: _sanitize_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_json(v) for v in obj]
-    return obj
 
 
 def _rebuild_master_payload() -> dict | None:
