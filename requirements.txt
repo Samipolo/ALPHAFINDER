@@ -21,3 +21,8 @@ numpy>=2,<3
 
 # Optional: Cloudflare bypass (install separately if needed)
 # pip install cloudscraper
+
+# Authentication + database
+SQLAlchemy>=2.0,<3
+psycopg2-binary>=2.9,<3
+bcrypt>=4.1,<5

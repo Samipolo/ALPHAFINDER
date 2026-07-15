@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, Query, Request, Response
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse as _StarletteJSONResponse
@@ -96,6 +97,21 @@ from services.credit_monitor import fetch_credit_monitor
 from services.liquidity_monitor import fetch_liquidity_monitor
 from services.real_rates_monitor import fetch_real_rates_monitor
 from services.lse_provider import fetch_lse_provider
+
+from db import User, UserSession, get_db, init_db
+from auth import (
+    ADMIN_EMAIL,
+    AuthGateMiddleware,
+    MIN_PASSWORD_LEN,
+    SESSION_COOKIE,
+    create_session,
+    get_current_user,
+    hash_password,
+    is_valid_email,
+    require_admin,
+    verify_password,
+)
+from sqlalchemy.orm import Session as OrmSession
 
 # -- Quant Lab / Options Flow / Institutional Desk --
 from services.quant_lab import fetch_quant_lab
@@ -250,6 +266,9 @@ async def lifespan(app: FastAPI):
     )
     _logger.info("[STARTUP] AlphaFinder Pro v%s starting up...", APP_VERSION)
 
+    init_db()
+    _logger.info("[STARTUP] Auth database ready")
+
     # Invalidate stale COT cache on startup so we always get fresh data
     global _payload_cache, _payload_ts
     persisted = _load_persisted_payload()
@@ -281,11 +300,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AlphaFinder Pro API", version=APP_VERSION, lifespan=lifespan)
 
+app.add_middleware(AuthGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 if os.path.exists(FRONTEND_DIR):
@@ -926,6 +947,140 @@ def _single_task(
 ) -> tuple[Any, dict[str, dict[str, str]]]:
     results, errors = _run_tasks([(name, func, default_factory)])
     return results[name], errors
+
+
+# ── Auth models ──────────────────────────────────────────────────────
+class SignupBody(BaseModel):
+    email: str
+    password: str
+
+
+class LoginBody(BaseModel):
+    email: str
+    password: str
+
+
+# The session cookie only requires HTTPS ("Secure") in production. Detected via
+# DATABASE_URL pointing at real Postgres (set explicitly in render.yaml) rather
+# than the local sqlite fallback — over plain-HTTP local dev, Secure would make
+# browsers silently refuse to store the cookie at all.
+_IS_PRODUCTION = os.environ.get("DATABASE_URL", "").startswith(("postgres://", "postgresql://"))
+COOKIE_KWARGS = dict(
+    httponly=True,
+    secure=_IS_PRODUCTION,
+    samesite="lax",
+    max_age=60 * 60 * 24 * 30,  # 30 days
+    path="/",
+)
+
+
+def _session_public(sess: "UserSession", email: str) -> dict:
+    return {
+        "id": sess.id,
+        "email": email,
+        "user_agent": sess.user_agent or "",
+        "ip_address": sess.ip_address or "",
+        "created_at": sess.created_at.isoformat() if sess.created_at else None,
+        "last_seen_at": sess.last_seen_at.isoformat() if sess.last_seen_at else None,
+    }
+
+
+@app.post("/api/auth/signup")
+def api_auth_signup(body: SignupBody, request: Request, response: Response, db: OrmSession = Depends(get_db)):
+    email = (body.email or "").strip().lower()
+    password = body.password or ""
+    if not is_valid_email(email):
+        return JSONResponse({"error": "Enter a valid email address."}, status_code=400)
+    if len(password) < MIN_PASSWORD_LEN:
+        return JSONResponse({"error": f"Password must be at least {MIN_PASSWORD_LEN} characters."}, status_code=400)
+    if db.query(User).filter(User.email == email).first():
+        return JSONResponse({"error": "An account with that email already exists."}, status_code=409)
+    user = User(email=email, password_hash=hash_password(password), is_admin=(email == ADMIN_EMAIL.lower()))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    token = create_session(db, user, request)
+    response.set_cookie(SESSION_COOKIE, token, **COOKIE_KWARGS)
+    return {"email": user.email, "is_admin": user.is_admin}
+
+
+@app.post("/api/auth/login")
+def api_auth_login(body: LoginBody, request: Request, response: Response, db: OrmSession = Depends(get_db)):
+    email = (body.email or "").strip().lower()
+    password = body.password or ""
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(password, user.password_hash):
+        return JSONResponse({"error": "Incorrect email or password."}, status_code=401)
+    token = create_session(db, user, request)
+    response.set_cookie(SESSION_COOKIE, token, **COOKIE_KWARGS)
+    return {"email": user.email, "is_admin": user.is_admin}
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request, response: Response, db: OrmSession = Depends(get_db)):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        sess = db.query(UserSession).filter(UserSession.token == token).first()
+        if sess:
+            sess.revoked = True
+            db.commit()
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def api_auth_me(user: User = Depends(get_current_user)):
+    return {"email": user.email, "is_admin": user.is_admin}
+
+
+# ── Admin: live sessions + user management ──────────────────────────
+@app.get("/api/admin/sessions")
+def api_admin_sessions(_: User = Depends(require_admin), db: OrmSession = Depends(get_db)):
+    rows = (
+        db.query(UserSession, User)
+        .join(User, UserSession.user_id == User.id)
+        .filter(UserSession.revoked == False)  # noqa: E712
+        .order_by(UserSession.last_seen_at.desc())
+        .all()
+    )
+    return {"sessions": [_session_public(sess, u.email) for sess, u in rows]}
+
+
+@app.post("/api/admin/sessions/{session_id}/revoke")
+def api_admin_revoke_session(session_id: int, _: User = Depends(require_admin), db: OrmSession = Depends(get_db)):
+    sess = db.query(UserSession).filter(UserSession.id == session_id).first()
+    if not sess:
+        return JSONResponse({"error": "Session not found."}, status_code=404)
+    sess.revoked = True
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/users")
+def api_admin_users(_: User = Depends(require_admin), db: OrmSession = Depends(get_db)):
+    users = db.query(User).order_by(User.created_at.asc()).all()
+    out = []
+    for u in users:
+        active = db.query(UserSession).filter(UserSession.user_id == u.id, UserSession.revoked == False).count()  # noqa: E712
+        out.append({
+            "id": u.id, "email": u.email, "is_admin": u.is_admin,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "active_sessions": active,
+        })
+    return {"users": out}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def api_admin_delete_user(user_id: int, admin: User = Depends(require_admin), db: OrmSession = Depends(get_db)):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        return JSONResponse({"error": "User not found."}, status_code=404)
+    if target.email == ADMIN_EMAIL.lower():
+        return JSONResponse({"error": "The primary admin account cannot be deleted."}, status_code=403)
+    db.query(UserSession).filter(UserSession.user_id == user_id).delete()
+    db.delete(target)
+    db.commit()
+    return {"ok": True}
 
 
 @app.get("/")

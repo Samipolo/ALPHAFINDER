@@ -3484,9 +3484,213 @@
       .qgrid, .qviz { grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); }
     }
   </style>
+
+  <style>
+    /* Auth gate */
+    #authGate {
+      position: fixed;
+      inset: 0;
+      z-index: 5000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse 900px 500px at 20% 10%, rgba(41, 98, 255, .12), transparent 60%),
+        radial-gradient(ellipse 700px 500px at 85% 90%, rgba(124, 77, 255, .10), transparent 60%),
+        #05050b;
+    }
+
+    #authCard {
+      width: 100%;
+      max-width: 380px;
+      margin: 20px;
+      background: var(--card);
+      border: 1px solid var(--b1);
+      border-radius: 16px;
+      padding: 32px 28px;
+      box-shadow: var(--sh);
+    }
+
+    #authCard .authLogo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+
+    #authCard .authLogo .a1box {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--bull), var(--purple));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 15px;
+      color: #fff;
+    }
+
+    #authCard .authLogo .title {
+      font-family: 'Syne', sans-serif;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    #authCard .authLogo .title span {
+      color: var(--bullB);
+    }
+
+    .authTabs {
+      display: flex;
+      gap: 4px;
+      background: var(--panel);
+      border-radius: 10px;
+      padding: 3px;
+      margin-bottom: 20px;
+    }
+
+    .authTabBtn {
+      flex: 1;
+      text-align: center;
+      padding: 8px 0;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      cursor: pointer;
+      color: var(--dim);
+    }
+
+    .authTabBtn.on {
+      background: var(--bull);
+      color: #fff;
+    }
+
+    .authField {
+      margin-bottom: 14px;
+    }
+
+    .authField label {
+      display: block;
+      font-size: 10px;
+      color: var(--dim);
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .authField input {
+      width: 100%;
+      background: var(--panel);
+      border: 1px solid var(--b2);
+      border-radius: 8px;
+      padding: 11px 12px;
+      color: var(--txt);
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s;
+    }
+
+    .authField input:focus {
+      border-color: var(--bull);
+    }
+
+    #authSubmit {
+      width: 100%;
+      padding: 12px 0;
+      border-radius: 10px;
+      border: none;
+      background: linear-gradient(135deg, var(--bull), var(--bullB));
+      color: #fff;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+
+    #authSubmit:disabled {
+      opacity: .6;
+      cursor: default;
+    }
+
+    #authError {
+      margin-top: 12px;
+      padding: 9px 12px;
+      border-radius: 8px;
+      background: var(--bearC);
+      border: 1px solid var(--bearA);
+      color: var(--bearB);
+      font-size: 11px;
+      line-height: 1.5;
+      display: none;
+    }
+
+    #authHint {
+      margin-top: 16px;
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    /* Admin panel */
+    .adminTbl th, .adminTbl td { white-space: nowrap; }
+    .adminYou {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: var(--bullA);
+      color: var(--bullB);
+      font-size: 8.5px;
+      letter-spacing: .5px;
+      margin-left: 6px;
+    }
+    .adminKick, .adminDel {
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--bearA);
+      background: var(--bearC);
+      color: var(--bearB);
+      font-size: 9.5px;
+      cursor: pointer;
+      letter-spacing: .3px;
+    }
+    .adminKick:hover, .adminDel:hover { background: var(--bearA); }
+  </style>
 </head>
 
 <body>
+  <!-- AUTH GATE -->
+  <div id="authGate">
+    <div id="authCard">
+      <div class="authLogo">
+        <div class="a1box">A1</div>
+        <div class="title">Alpha<span>Finder</span></div>
+      </div>
+      <div class="authTabs">
+        <div class="authTabBtn on" id="authTabIn" onclick="authSetMode('login')">Sign In</div>
+        <div class="authTabBtn" id="authTabUp" onclick="authSetMode('signup')">Sign Up</div>
+      </div>
+      <form id="authForm" onsubmit="return authSubmit(event)">
+        <div class="authField">
+          <label>Email</label>
+          <input type="email" id="authEmail" autocomplete="username" required>
+        </div>
+        <div class="authField">
+          <label>Password</label>
+          <input type="password" id="authPassword" autocomplete="current-password" required minlength="8">
+        </div>
+        <button type="submit" id="authSubmitBtn">Sign In</button>
+      </form>
+      <div id="authError"></div>
+      <div id="authHint">An account is required to access AlphaFinder. Your password is stored hashed and never visible to anyone, including the admin.</div>
+    </div>
+  </div>
   <!-- AETHER FLOW SHADER BACKGROUND -->
   <div id="aetherFlow" style="position:fixed;inset:0;z-index:-2;pointer-events:none;"></div>
   <!-- HEADER -->
@@ -4225,7 +4429,7 @@ let timerID, timerSec = autoRefreshSec;
     function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+      return fetch(url, { credentials: "same-origin", ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
     }
 
     async function fetchJsonFromBases(path) {
@@ -4233,6 +4437,7 @@ let timerID, timerSec = autoRefreshSec;
       for (const base of API_BASES) {
         try {
           const res = await fetchWithTimeout(base + path, {});
+          if (res.status === 401 && !path.startsWith("/auth/")) { showAuthGate("Your session ended — sign in again to continue."); throw new Error("HTTP 401"); }
           if (!res.ok) throw new Error("HTTP " + res.status);
           return { base, data: await res.json() };
         } catch (err) {
@@ -11690,7 +11895,126 @@ let timerID, timerSec = autoRefreshSec;
       const _rc = typeof renderCorrelation === "function" ? renderCorrelation : null;
       if (_rc) renderCorrelation = function () { _rc.apply(this, arguments); setTimeout(build3DCorrelation, 140); };
     }
-    document.addEventListener("DOMContentLoaded", () => {
+    let currentUser = null;
+    let dashboardBooted = false;
+
+    // ── Admin Panel ──
+    function ensureAdminPane() {
+      const tabs = document.querySelector(".tabs");
+      if (tabs && !Array.from(tabs.children).some(n => (n.getAttribute("onclick") || "").includes("'admin'"))) {
+        const tab = document.createElement("div");
+        tab.className = "tab";
+        tab.textContent = "👑 Admin";
+        tab.setAttribute("onclick", "goTab(event,'admin');adminLoad()");
+        tabs.appendChild(tab);
+      }
+      if (!document.getElementById("admin")) {
+        const anchor = document.getElementById("econ_raw");
+        if (!anchor) return;
+        const pane = document.createElement("div");
+        pane.id = "admin";
+        pane.className = "pane";
+        pane.innerHTML = `
+    <div class="ptitle">Admin — Access Control</div>
+    <div class="psub">Every signed-in account and device, live. Revoke a session to sign that device out instantly, or remove an account entirely. Visible only to ${escHtml(currentUser ? currentUser.email : "the admin")}.</div>
+    <div class="qctl"><button class="bref" onclick="adminLoad(true)">REFRESH</button><span class="qstatus" id="adminStatus"></span></div>
+    <div class="ptitle" style="font-size:14px;margin-bottom:8px;">Live Sessions (connected devices)</div>
+    <div class="tw"><table class="adminTbl">
+      <thead><tr><th>Email</th><th>Device / Browser</th><th>IP</th><th>Signed in</th><th>Last active</th><th></th></tr></thead>
+      <tbody id="adminSessionsBody"></tbody>
+    </table></div>
+    <div class="ptitle" style="font-size:14px;margin:16px 0 8px;">All Accounts</div>
+    <div class="tw"><table class="adminTbl">
+      <thead><tr><th>Email</th><th>Role</th><th>Active devices</th><th>Joined</th><th></th></tr></thead>
+      <tbody id="adminUsersBody"></tbody>
+    </table></div>`;
+        anchor.parentNode.insertBefore(pane, anchor);
+      }
+    }
+
+    function adminDeviceLabel(ua) {
+      if (!ua) return "Unknown device";
+      const isMobile = /iPhone|Android.*Mobile/i.test(ua);
+      const isTablet = /iPad|Android(?!.*Mobile)/i.test(ua);
+      const platform = /iPhone|iPad/.test(ua) ? "iOS" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Macintosh/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "Unknown";
+      const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) && !/Chrome/.test(ua) ? "Safari" : "Browser";
+      const kind = isMobile ? "📱" : isTablet ? "📲" : "🖥";
+      return `${kind} ${platform} · ${browser}`;
+    }
+
+    function adminAgo(iso) {
+      if (!iso) return "—";
+      const s = Math.max(0, (Date.now() - new Date(iso + (iso.endsWith("Z") ? "" : "Z")).getTime()) / 1000);
+      if (s < 60) return "just now";
+      if (s < 3600) return Math.floor(s / 60) + "m ago";
+      if (s < 86400) return Math.floor(s / 3600) + "h ago";
+      return Math.floor(s / 86400) + "d ago";
+    }
+
+    async function adminLoad(force) {
+      const st = document.getElementById("adminStatus");
+      if (st) st.textContent = "loading…";
+      try {
+        const [sessRes, userRes] = await Promise.all([
+          fetch("/api/admin/sessions", { credentials: "same-origin" }),
+          fetch("/api/admin/users", { credentials: "same-origin" }),
+        ]);
+        if (!sessRes.ok || !userRes.ok) throw new Error("HTTP " + sessRes.status + "/" + userRes.status);
+        const sessData = await sessRes.json();
+        const userData = await userRes.json();
+        renderAdminSessions(sessData.sessions || []);
+        renderAdminUsers(userData.users || []);
+        if (st) st.textContent = `${(sessData.sessions || []).length} live sessions · ${(userData.users || []).length} accounts`;
+      } catch (e) {
+        if (st) st.textContent = "failed: " + e.message;
+      }
+    }
+
+    function renderAdminSessions(sessions) {
+      const body = document.getElementById("adminSessionsBody");
+      if (!body) return;
+      body.innerHTML = sessions.map(s => `<tr>
+        <td>${escHtml(s.email)}${currentUser && s.email === currentUser.email ? '<span class="adminYou">this device?</span>' : ""}</td>
+        <td>${adminDeviceLabel(s.user_agent)}</td>
+        <td>${escHtml(s.ip_address || "—")}</td>
+        <td>${adminAgo(s.created_at)}</td>
+        <td>${adminAgo(s.last_seen_at)}</td>
+        <td><button class="adminKick" onclick="adminRevoke(${s.id})">SIGN OUT</button></td>
+      </tr>`).join("") || `<tr><td colspan="6">No active sessions</td></tr>`;
+    }
+
+    function renderAdminUsers(users) {
+      const body = document.getElementById("adminUsersBody");
+      if (!body) return;
+      body.innerHTML = users.map(u => `<tr>
+        <td>${escHtml(u.email)}${currentUser && u.email === currentUser.email ? '<span class="adminYou">YOU</span>' : ""}</td>
+        <td>${u.is_admin ? qlPill("ADMIN", "gold") : qlPill("member", "")}</td>
+        <td>${u.active_sessions}</td>
+        <td>${adminAgo(u.created_at)}</td>
+        <td>${u.is_admin ? "" : `<button class="adminDel" onclick="adminDeleteUser(${u.id},'${escHtml(u.email)}')">REMOVE</button>`}</td>
+      </tr>`).join("") || `<tr><td colspan="5">No accounts</td></tr>`;
+    }
+
+    async function adminRevoke(sessionId) {
+      try {
+        const res = await fetch(`/api/admin/sessions/${sessionId}/revoke`, { method: "POST", credentials: "same-origin" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        adminLoad();
+      } catch (e) { alert("Failed to sign out that device: " + e.message); }
+    }
+
+    async function adminDeleteUser(userId, email) {
+      if (!confirm(`Remove the account "${email}"? This signs them out everywhere and cannot be undone.`)) return;
+      try {
+        const res = await fetch(`/api/admin/users/${userId}`, { method: "DELETE", credentials: "same-origin" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        adminLoad();
+      } catch (e) { alert("Failed to remove account: " + e.message); }
+    }
+
+    function bootDashboard() {
+      if (dashboardBooted) return;
+      dashboardBooted = true;
       ensureEdgeLabPane();
       ensureGexPane();
       ensureAtrPane();
@@ -11705,11 +12029,112 @@ let timerID, timerSec = autoRefreshSec;
       restructureTabs();
       upgradeChartsPane();
       chInjectTools();
+      ensureUserBadge();
+      if (currentUser && currentUser.is_admin) ensureAdminPane();
       ensureTabScroller();
       initPropFirmAnalyzer();
       setInitialTab("edgelab");
       loadAll();
       startTimer();
+    }
+
+    function authSetMode(mode) {
+      const isLogin = mode === "login";
+      document.getElementById("authTabIn").classList.toggle("on", isLogin);
+      document.getElementById("authTabUp").classList.toggle("on", !isLogin);
+      document.getElementById("authForm").dataset.mode = mode;
+      document.getElementById("authSubmitBtn").textContent = isLogin ? "Sign In" : "Create Account";
+      document.getElementById("authPassword").autocomplete = isLogin ? "current-password" : "new-password";
+      document.getElementById("authError").style.display = "none";
+    }
+
+    function showAuthGate(message) {
+      dashboardBooted = false;
+      currentUser = null;
+      const gate = document.getElementById("authGate");
+      gate.style.display = "flex";
+      document.body.style.overflow = "hidden";
+      const badge = document.getElementById("userBadge");
+      if (badge) badge.remove();
+      if (message) {
+        const err = document.getElementById("authError");
+        err.textContent = message;
+        err.style.display = "block";
+      }
+    }
+
+    function hideAuthGate() {
+      document.getElementById("authGate").style.display = "none";
+      document.body.style.overflow = "";
+    }
+
+    async function authSubmit(event) {
+      event.preventDefault();
+      const mode = document.getElementById("authForm").dataset.mode || "login";
+      const email = document.getElementById("authEmail").value.trim();
+      const password = document.getElementById("authPassword").value;
+      const btn = document.getElementById("authSubmitBtn");
+      const err = document.getElementById("authError");
+      err.style.display = "none";
+      btn.disabled = true;
+      const prevText = btn.textContent;
+      btn.textContent = mode === "login" ? "Signing in…" : "Creating account…";
+      try {
+        const res = await fetch((mode === "login" ? "/api/auth/login" : "/api/auth/signup"), {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Something went wrong.");
+        currentUser = data;
+        hideAuthGate();
+        bootDashboard();
+      } catch (e) {
+        err.textContent = e.message;
+        err.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prevText;
+      }
+    }
+
+    async function authSignOut() {
+      try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+      location.reload();
+    }
+
+    function ensureUserBadge() {
+      if (document.getElementById("userBadge") || !currentUser) return;
+      const hright = document.querySelector(".hright");
+      if (!hright) return;
+      const badge = document.createElement("div");
+      badge.className = "hbadge";
+      badge.id = "userBadge";
+      badge.style.cursor = "pointer";
+      badge.title = "Sign out";
+      badge.innerHTML = `${currentUser.is_admin ? "👑 " : ""}${escHtml(currentUser.email)}`;
+      badge.onclick = authSignOut;
+      hright.insertBefore(badge, hright.firstChild);
+    }
+
+    async function checkAuthAndBoot() {
+      try {
+        const res = await fetch("/api/auth/me", { credentials: "same-origin" });
+        if (res.ok) {
+          currentUser = await res.json();
+          hideAuthGate();
+          bootDashboard();
+          return;
+        }
+      } catch (e) {}
+      showAuthGate();
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      authSetMode("login");
+      checkAuthAndBoot();
     });
   </script>
   <!-- AETHER FLOW SHADER BACKGROUND (hue 260 / speed 0.15 / intensity 0.7 / complexity 6.0 / warp 0.4) -->
