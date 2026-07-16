@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from services.price_data import robust_history
 
 UNIVERSE = [
     "SPY", "QQQ", "DIA", "IWM", "TLT", "GLD", "SLV", "USO",
@@ -35,7 +36,7 @@ _CACHE_LOCK = threading.Lock()
 
 
 def _fetch_history(symbol: str, period: str = "2y") -> pd.DataFrame:
-    df = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+    df = robust_history(symbol, period=period, interval="1d", auto_adjust=True)
     if df is None or df.empty or len(df) < 120:
         raise ValueError(f"insufficient history for {symbol}")
     return df

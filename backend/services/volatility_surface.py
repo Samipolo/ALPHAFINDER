@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import CACHE_DIR, VIX_TERM
 from services.net_utils import disable_dead_proxy_env
+from services.price_data import robust_history
 
 CACHE_FILE = os.path.join(CACHE_DIR, "vol_surface.json")
 CACHE_TTL = 1800
@@ -37,8 +38,7 @@ def fetch_volatility_surface() -> dict[str, Any]:
     vix_data = {}
     for name, ticker in VIX_TERM.items():
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="60d")
+            hist = robust_history(ticker, period="60d", interval="1d")
             if not hist.empty:
                 close = hist["Close"].dropna()
                 vix_data[name] = {

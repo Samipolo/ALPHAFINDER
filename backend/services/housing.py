@@ -85,11 +85,11 @@ def _fhfa() -> list[dict]:
     return pts[:24]
 
 def _market_gauges() -> dict[str, list[dict]]:
-    import yfinance as yf
+    from services.price_data import robust_history
     out = {}
     for tkr, name in (("ITB", "Homebuilders_ITB"), ("XHB", "Homebuilders_XHB"), ("VNQ", "REITs_VNQ")):
         try:
-            h = yf.Ticker(tkr).history(period="3mo", interval="1d", auto_adjust=True)
+            h = robust_history(tkr, period="3mo", interval="1d", auto_adjust=True)
             if h is None or h.empty:
                 continue
             pts = [{"date": str(idx.date()), "value": round(float(v), 2)}

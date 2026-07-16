@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+from services.price_data import robust_history
 
 CHART_SYMBOLS = [
     "SPY", "QQQ", "DIA", "IWM", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "META",
@@ -52,8 +53,8 @@ def _bars_binance(symbol: str, interval: str, limit: int) -> pd.DataFrame:
     return df
 
 def _bars_yf(symbol: str, spec: dict) -> pd.DataFrame:
-    df = yf.Ticker(symbol).history(period=spec["yf_period"],
-                                   interval=spec["yf_interval"], auto_adjust=True)
+    df = robust_history(symbol, period=spec["yf_period"],
+                        interval=spec["yf_interval"], auto_adjust=True)
     if df is None or df.empty:
         raise ValueError(f"no bars for {symbol}")
     return df

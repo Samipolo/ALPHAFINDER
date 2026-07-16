@@ -61,6 +61,7 @@ from services.analytics import (
 )
 from services.economic import fetch_economic
 from services.forex_factory import fetch_forexfactory_calendar
+from services.nasdaq_calendar import fetch_nasdaq_calendar
 from services.investing_com import (
     fetch_economic_calendar,
     fetch_quotes,
@@ -478,9 +479,17 @@ def _parse_event_datetime(value: str) -> datetime | None:
 
 
 def _calendar_alert_payload(
-    calendar: list[dict[str, Any]], ff_calendar: list[dict[str, Any]]
+    nasdaq_calendar: list[dict[str, Any]] | None = None,
+    calendar: list[dict[str, Any]] | None = None,
+    ff_calendar: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    combined = _dedupe_calendar_events(calendar, ff_calendar)
+    # Merges every calendar source (Nasdaq primary, then Investing.com and
+    # Forex Factory) so an alert pulse is produced as long as at least one
+    # source returned events.
+    nasdaq_calendar = nasdaq_calendar or []
+    calendar = calendar or []
+    ff_calendar = ff_calendar or []
+    combined = _dedupe_calendar_events(nasdaq_calendar, calendar, ff_calendar)
     high_impact: list[dict[str, Any]] = []
     for event in combined:
         try:
@@ -524,6 +533,7 @@ def _calendar_alert_payload(
             for item in high_impact[:8]
         ],
         "source_status": {
+            "nasdaq": _source_status(nasdaq_calendar),
             "investing": _source_status(calendar),
             "forex_factory": _source_status(ff_calendar),
         },
@@ -1164,8 +1174,18 @@ def api_technical():
 
 @app.get("/api/calendar")
 def api_calendar():
-    events, errors = _single_task("calendar", fetch_economic_calendar, list)
-    payload = {"data": events, "count": len(events), "source": "Investing.com"}
+    tasks = [
+        ("nasdaq_calendar", fetch_nasdaq_calendar, list),
+        ("calendar", fetch_economic_calendar, list),
+        ("ff_calendar", fetch_forexfactory_calendar, list),
+    ]
+    results, errors = _run_tasks(tasks)
+    events = _dedupe_calendar_events(
+        results.get("nasdaq_calendar") or [],
+        results.get("calendar") or [],
+        results.get("ff_calendar") or [],
+    )
+    payload = {"data": events, "count": len(events), "source": "Nasdaq + Investing.com + Forex Factory"}
     if errors:
         payload["errors"] = errors
     return JSONResponse(payload)
@@ -1174,16 +1194,18 @@ def api_calendar():
 @app.get("/api/calendar/alerts")
 def api_calendar_alerts():
     tasks = [
+        ("nasdaq_calendar", lambda: fetch_nasdaq_calendar(2, 2), list),
         ("calendar", lambda: fetch_economic_calendar(2), list),
         ("ff_calendar", lambda: fetch_forexfactory_calendar(2), list),
     ]
     results, errors = _run_tasks(tasks)
     payload = _calendar_alert_payload(
+        results.get("nasdaq_calendar") or [],
         results.get("calendar") or [],
         results.get("ff_calendar") or [],
     )
     payload["last_checked"] = _utc_now_iso()
-    payload["source"] = "Investing.com + Forex Factory"
+    payload["source"] = "Nasdaq + Investing.com + Forex Factory"
     if errors:
         payload["errors"] = errors
     return JSONResponse(payload)
@@ -1217,6 +1239,7 @@ def _build_master_payload() -> dict:
         ("technical", fetch_technical, dict),
         ("calendar", fetch_economic_calendar, list),
         ("ff_calendar", fetch_forexfactory_calendar, list),
+        ("nasdaq_calendar", fetch_nasdaq_calendar, list),
         ("definitions", fetch_indicator_definitions, dict),
         ("quotes", fetch_quotes, dict),
         ("bonds", fetch_bond_yields, dict),
@@ -1250,13 +1273,14 @@ def _build_master_payload() -> dict:
     tech = results["technical"]
     calendar = results["calendar"]
     ff_calendar = results["ff_calendar"]
+    nasdaq_calendar = results.get("nasdaq_calendar", [])
     definitions = results["definitions"]
     quotes = results["quotes"]
     bonds = results["bonds"]
     options_gex = results["options_gex"]
     newsletter = results["newsletter"]
     trade_ideas = results["trade_ideas"]
-    calendar_alerts = _calendar_alert_payload(calendar, ff_calendar)
+    calendar_alerts = _calendar_alert_payload(nasdaq_calendar, calendar, ff_calendar)
     try:
         daily_atr = fetch_daily_atr()
     except Exception as exc:
@@ -1288,16 +1312,19 @@ def _build_master_payload() -> dict:
     except Exception:
         session_map = {}
 
-    combined_calendar = _dedupe_calendar_events(calendar, ff_calendar)
+    # Nasdaq first so its (reliable, datacenter-friendly) events win de-dupe.
+    combined_calendar = _dedupe_calendar_events(nasdaq_calendar, calendar, ff_calendar)
     weekly_scores = {}
     ff_scores = {}
 
     try:
-        weekly_scores = get_calendar_scores(calendar) if calendar else {}
+        # Score off the fullest merged feed so releases are captured no matter
+        # which upstream source happened to carry them.
+        weekly_scores = get_calendar_scores(combined_calendar) if combined_calendar else {}
         ff_scores = get_calendar_scores(ff_calendar) if ff_calendar else {}
-        ff_latest_scores = get_latest_calendar_scores(ff_calendar) if ff_calendar else {}
+        latest_scores = get_latest_calendar_scores(combined_calendar) if combined_calendar else {}
         econ = _build_effective_economic_scores(
-            econ, ff_latest_scores, weekly_scores, ff_scores
+            econ, latest_scores, weekly_scores, ff_scores
         )
     except Exception as exc:
         errors["calendar_scores"] = _error_payload(exc)
@@ -1512,11 +1539,11 @@ def _build_master_payload() -> dict:
             "technical": "yfinance SMA/ROC + seasonality",
             "quotes": "Investing.com / yfinance",
             "bonds": "TradingEconomics",
-            "options_gex": "Yahoo Finance options chain / yfinance",
+            "options_gex": "Yahoo Finance / Cboe / Nasdaq option chains (auto-fallback)",
             "newsletter": "Federal Reserve, ECB, BIS, CFTC, World Bank, and institutional commentary pages",
             "daily_atr": "yfinance daily OHLC",
             "trade_ideas": "yfinance daily + intraday OHLC, EMA 50/200, ATR, VWAP/session proxy, correlation basket",
-            "calendar_alerts": "Investing.com + Forex Factory high-impact event pulse",
+            "calendar_alerts": "Nasdaq + Investing.com + Forex Factory high-impact event pulse",
             # v4 sources
             "yield_curve": "FRED Treasury yields (DGS series)",
             "cross_rates": "yfinance FX crosses",
