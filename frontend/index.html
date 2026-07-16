@@ -9399,7 +9399,7 @@ let timerID, timerSec = autoRefreshSec;
         pane.className = "pane";
         pane.innerHTML = `
     <div class="ptitle">Options Flow Desk</div>
-    <div class="psub">Live option-chain flow analytics from real Yahoo Finance chains — put/call ratios, net premium flow, dealer gamma (GEX), gamma flip, max pain, IV term structure and skew, and unusual-activity sweeps ranked by traded premium.</div>
+    <div class="psub">Live option-chain flow analytics from real chains — put/call ratios, net premium flow, dealer gamma (GEX), gamma flip, max pain, IV term structure and skew, and unusual-activity sweeps ranked by traded premium. Sourced from Yahoo Finance with automatic fallback to Cboe and Nasdaq delayed feeds if Yahoo is rate-limited, so a scan always returns real market data.</div>
     <div class="qctl">
       <select class="qsel" id="oflowSym" onchange="oflowLoad(true)"></select>
       <button class="bref" onclick="oflowLoad(true)">SCAN FLOW</button>

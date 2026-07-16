@@ -1,17 +1,27 @@
-"""Options Flow - real option-chain analytics from Yahoo Finance.
+"""Options Flow - real option-chain analytics with automatic multi-source
+fallback: Yahoo Finance -> Cboe -> Nasdaq.
 
 Every number is derived from live chain snapshots (volume, open interest,
-implied volatility, bid/ask). No synthetic rows: symbols whose chains
-cannot be fetched return an error entry instead of fake data.
+implied volatility, bid/ask). No synthetic rows: a symbol whose chain can't
+be fetched from ANY source returns an error entry instead of fake data.
+
+Yahoo Finance (yfinance) is tried first since it has the richest per-contract
+data, but it runs on a shared pool of cloud IPs and gets rate-limited by
+Yahoo under load ("Too Many Requests"). Cboe's and Nasdaq's public delayed
+quote feeds are free, keyless, and independent of Yahoo's rate limiter, so
+either one covers for Yahoo when it's throttled -- the desk stays live with
+real market data instead of a bare 500.
 """
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from typing import Any
 
-import numpy as np
+import pandas as pd
+import requests
 import yfinance as yf
 
 FLOW_SYMBOLS = ["SPY", "QQQ", "IWM", "DIA", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GLD", "TLT"]
@@ -19,6 +29,13 @@ FLOW_SYMBOLS = ["SPY", "QQQ", "IWM", "DIA", "AAPL", "NVDA", "TSLA", "MSFT", "AMZ
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 300
 _CACHE_LOCK = threading.Lock()
+
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+_MAX_EXPIRIES = 4
+
+_OCC_RE = re.compile(r"^[A-Z]+(\d{6})([CP])(\d{8})$")
+
+_CHAIN_COLUMNS = ["strike", "bid", "ask", "lastPrice", "volume", "openInterest", "impliedVolatility"]
 
 
 def _norm_pdf(x: float) -> float:
@@ -40,6 +57,206 @@ def _mid(row) -> float:
         return (bid + ask) / 2
     return last
 
+
+def _empty_chain_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_CHAIN_COLUMNS)
+
+
+def _parse_occ(occ_symbol: str) -> tuple[str, str, float] | None:
+    """Parse a standard OCC option symbol into (expiry "YYYY-MM-DD", "C"/"P", strike)."""
+    m = _OCC_RE.match(occ_symbol.strip().upper())
+    if not m:
+        return None
+    yymmdd, cp, strike8 = m.groups()
+    expiry = f"20{yymmdd[0:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
+    return expiry, cp, int(strike8) / 1000.0
+
+
+def _num(x) -> float:
+    if x is None:
+        return 0.0
+    if isinstance(x, (int, float)):
+        return float(x) if x == x else 0.0  # noqa: PLR0124 (NaN check)
+    s = str(x).strip().replace(",", "")
+    if not s or s == "--":
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+# _____________________________________________________________
+#  Provider 1: Yahoo Finance (yfinance) - richest data, primary source
+# _____________________________________________________________
+
+def _yahoo_chains(symbol: str) -> tuple[float, float, list[tuple[str, pd.DataFrame, pd.DataFrame]]]:
+    tk = yf.Ticker(symbol)
+    hist = tk.history(period="5d", interval="1d", auto_adjust=True)
+    if hist is None or hist.empty:
+        raise ValueError("no spot history")
+    spot = float(hist["Close"].iloc[-1])
+    chg = float(hist["Close"].pct_change().iloc[-1] * 100) if len(hist) > 1 else 0.0
+    expiries = list(tk.options or [])[:_MAX_EXPIRIES]
+    if not expiries:
+        raise ValueError("no listed options")
+
+    chains = []
+    for exp in expiries:
+        try:
+            ch = tk.option_chain(exp)
+        except Exception:
+            continue
+        if ch.calls.empty and ch.puts.empty:
+            continue
+        chains.append((exp, ch.calls, ch.puts))
+    if not chains:
+        raise ValueError("no usable expiries")
+    return spot, chg, chains
+
+
+# _____________________________________________________________
+#  Provider 2: Cboe delayed quotes - free, keyless, real per-contract
+#  IV/delta/gamma (no Black-Scholes approximation needed)
+# _____________________________________________________________
+
+def _cboe_chains(symbol: str) -> tuple[float, float, list[tuple[str, pd.DataFrame, pd.DataFrame]]]:
+    url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
+    r = requests.get(url, headers=_UA, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    data = payload.get("data") or {}
+    options = data.get("options") or []
+    if not options:
+        raise ValueError("Cboe returned no option contracts")
+    spot = float(data.get("current_price") or 0)
+    if spot <= 0:
+        raise ValueError("Cboe returned no spot price")
+    chg = float(data.get("price_change_percent") or 0)
+
+    by_expiry: dict[str, dict[str, list[dict]]] = {}
+    for opt in options:
+        parsed = _parse_occ(opt.get("option", ""))
+        if not parsed:
+            continue
+        expiry, cp, strike = parsed
+        row = {
+            "strike": strike,
+            "bid": _num(opt.get("bid")),
+            "ask": _num(opt.get("ask")),
+            "lastPrice": _num(opt.get("last_trade_price")),
+            "volume": _num(opt.get("volume")),
+            "openInterest": _num(opt.get("open_interest")),
+            "impliedVolatility": _num(opt.get("iv")),
+            "delta": _num(opt.get("delta")),
+            "gamma": _num(opt.get("gamma")),
+        }
+        by_expiry.setdefault(expiry, {"C": [], "P": []})[cp].append(row)
+
+    chains = []
+    for expiry in sorted(by_expiry)[:_MAX_EXPIRIES]:
+        sides = by_expiry[expiry]
+        calls = pd.DataFrame(sides["C"]) if sides["C"] else _empty_chain_df()
+        puts = pd.DataFrame(sides["P"]) if sides["P"] else _empty_chain_df()
+        if calls.empty and puts.empty:
+            continue
+        chains.append((expiry, calls, puts))
+    if not chains:
+        raise ValueError("Cboe chain had no parseable contracts")
+    return spot, chg, chains
+
+
+# _____________________________________________________________
+#  Provider 3: Nasdaq option-chain - free, keyless, last-resort fallback.
+#  No per-contract IV/Greeks in this public feed, so GEX/IV-term/skew come
+#  back unavailable (None) for symbols served from this tier -- volume, open
+#  interest, premium flow and max pain are all still real.
+# _____________________________________________________________
+
+_NASDAQ_OCC_TAIL_RE = re.compile(r"(\d{6})([cp])(\d{8})$")
+
+
+def _nasdaq_chains(symbol: str) -> tuple[float, float, list[tuple[str, pd.DataFrame, pd.DataFrame]]]:
+    url = f"https://api.nasdaq.com/api/quote/{symbol}/option-chain"
+    params = {
+        "assetclass": "stocks",
+        "limit": "500",
+        "fromdate": "all",
+        "todate": "undefined",
+        "excode": "oprac",
+        "callput": "callput",
+        "money": "all",
+        "type": "all",
+    }
+    r = requests.get(url, headers=_UA, params=params, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    data = payload.get("data") or {}
+    rows = ((data.get("table") or {}).get("rows")) or []
+    if not rows:
+        raise ValueError("Nasdaq returned no option rows")
+    m = re.search(r"\$?([\d,]+\.\d+)", data.get("lastTrade") or "")
+    spot = float(m.group(1).replace(",", "")) if m else 0.0
+    if spot <= 0:
+        raise ValueError("Nasdaq returned no spot price")
+    chg = 0.0  # not present in this feed; last-resort tier, acceptable degradation
+
+    by_expiry: dict[str, dict[str, list[dict]]] = {}
+    for row in rows:
+        strike = row.get("strike")
+        drill = row.get("drillDownURL") or ""
+        if strike in (None, "") or not drill:
+            continue  # header/expiry-separator row, not a real strike
+        tail = _NASDAQ_OCC_TAIL_RE.search(drill.replace("--", ""))
+        if not tail:
+            continue
+        yymmdd = tail.group(1)
+        expiry = f"20{yymmdd[0:2]}-{yymmdd[2:4]}-{yymmdd[4:6]}"
+        strike_f = _num(strike)
+        by_expiry.setdefault(expiry, {"C": [], "P": []})
+        by_expiry[expiry]["C"].append({
+            "strike": strike_f,
+            "bid": _num(row.get("c_Bid")),
+            "ask": _num(row.get("c_Ask")),
+            "lastPrice": _num(row.get("c_Last")),
+            "volume": _num(row.get("c_Volume")),
+            "openInterest": _num(row.get("c_Openinterest")),
+            "impliedVolatility": 0.0,
+        })
+        by_expiry[expiry]["P"].append({
+            "strike": strike_f,
+            "bid": _num(row.get("p_Bid")),
+            "ask": _num(row.get("p_Ask")),
+            "lastPrice": _num(row.get("p_Last")),
+            "volume": _num(row.get("p_Volume")),
+            "openInterest": _num(row.get("p_Openinterest")),
+            "impliedVolatility": 0.0,
+        })
+
+    chains = []
+    for expiry in sorted(by_expiry)[:_MAX_EXPIRIES]:
+        sides = by_expiry[expiry]
+        calls = pd.DataFrame(sides["C"]) if sides["C"] else _empty_chain_df()
+        puts = pd.DataFrame(sides["P"]) if sides["P"] else _empty_chain_df()
+        if calls.empty and puts.empty:
+            continue
+        chains.append((expiry, calls, puts))
+    if not chains:
+        raise ValueError("Nasdaq chain had no parseable contracts")
+    return spot, chg, chains
+
+
+_PROVIDERS: list[tuple[str, Any]] = [
+    ("Yahoo Finance", _yahoo_chains),
+    ("Cboe", _cboe_chains),
+    ("Nasdaq", _nasdaq_chains),
+]
+
+
+# _____________________________________________________________
+#  Provider-agnostic metrics computation (unchanged math, now fed by
+#  whichever source actually returned live data)
+# _____________________________________________________________
 
 def _max_pain(calls, puts) -> float | None:
     strikes = sorted(set(calls["strike"]).union(set(puts["strike"])))
@@ -71,17 +288,7 @@ def _iv_near(chain, target: float) -> float | None:
     return float(df.loc[idx, "impliedVolatility"])
 
 
-def _analyze_symbol(symbol: str) -> dict[str, Any]:
-    tk = yf.Ticker(symbol)
-    hist = tk.history(period="5d", interval="1d", auto_adjust=True)
-    if hist is None or hist.empty:
-        raise ValueError("no spot history")
-    spot = float(hist["Close"].iloc[-1])
-    chg = float(hist["Close"].pct_change().iloc[-1] * 100) if len(hist) > 1 else 0.0
-    expiries = list(tk.options or [])[:4]
-    if not expiries:
-        raise ValueError("no listed options")
-
+def _compute_metrics(symbol: str, spot: float, chg: float, chains: list[tuple[str, pd.DataFrame, pd.DataFrame]]) -> dict[str, Any]:
     now = time.time()
     per_expiry = []
     unusual: list[dict] = []
@@ -89,14 +296,13 @@ def _analyze_symbol(symbol: str) -> dict[str, Any]:
     tot_cv = tot_pv = tot_coi = tot_poi = 0.0
     net_prem = 0.0
 
-    for exp in expiries:
-        try:
-            ch = tk.option_chain(exp)
-        except Exception:
-            continue
-        calls, puts = ch.calls, ch.puts
-        if calls.empty and puts.empty:
-            continue
+    for exp, calls, puts in chains:
+        for col in _CHAIN_COLUMNS:
+            if col not in calls.columns:
+                calls[col] = 0.0
+            if col not in puts.columns:
+                puts[col] = 0.0
+        has_real_gamma = "delta" in calls.columns and "gamma" in calls.columns
         t_years = max((time.mktime(time.strptime(exp, "%Y-%m-%d")) - now) / (365.25 * 86400), 1 / 365)
         cv = float(calls["volume"].fillna(0).sum())
         pv = float(puts["volume"].fillna(0).sum())
@@ -111,7 +317,6 @@ def _analyze_symbol(symbol: str) -> dict[str, Any]:
         call_wing = _iv_near(calls, spot * 1.05)
         cw = calls.loc[calls["openInterest"].fillna(0).idxmax()] if not calls.empty else None
         pw = puts.loc[puts["openInterest"].fillna(0).idxmax()] if not puts.empty else None
-        # expected move from the ATM straddle (real quoted premiums)
         exp_move = None
         try:
             c_atm = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
@@ -142,10 +347,16 @@ def _analyze_symbol(symbol: str) -> dict[str, Any]:
                 vol = float(row.get("volume") or 0)
                 iv = float(row.get("impliedVolatility") or 0)
                 strike = float(row["strike"])
-                if oi > 0 and iv > 0.001:
-                    gamma = _bs_gamma(spot, strike, iv, t_years)
-                    gex = sign * gamma * oi * 100 * spot * spot * 0.01
-                    gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
+                if oi > 0:
+                    if has_real_gamma and float(row.get("gamma") or 0) != 0:
+                        gamma = abs(float(row.get("gamma") or 0))
+                    elif iv > 0.001:
+                        gamma = _bs_gamma(spot, strike, iv, t_years)
+                    else:
+                        gamma = 0.0
+                    if gamma:
+                        gex = sign * gamma * oi * 100 * spot * spot * 0.01
+                        gex_by_strike[strike] = gex_by_strike.get(strike, 0.0) + gex
                 if vol >= 300 and vol > 3 * max(oi, 1):
                     prem = vol * _mid(row) * 100
                     if prem > 50000:
@@ -170,19 +381,17 @@ def _analyze_symbol(symbol: str) -> dict[str, Any]:
             flip = k
     term = [{"expiry": e["expiry"], "atm_iv_pct": e["atm_iv_pct"]} for e in per_expiry if e["atm_iv_pct"]]
 
-    # OI ladder and IV smile from the front expiry (real chain rows)
     oi_ladder, smile = [], []
-    ladder_exp = expiries[0]
+    ladder_exp = chains[0][0]
     try:
-        for cand in expiries:
-            chk = tk.option_chain(cand)
-            if float(chk.calls["openInterest"].fillna(0).sum()) + float(chk.puts["openInterest"].fillna(0).sum()) > 0:
-                ladder_exp = cand
+        ch0_calls, ch0_puts = chains[0][1], chains[0][2]
+        for cand_exp, cand_calls, cand_puts in chains:
+            if float(cand_calls["openInterest"].fillna(0).sum()) + float(cand_puts["openInterest"].fillna(0).sum()) > 0:
+                ladder_exp, ch0_calls, ch0_puts = cand_exp, cand_calls, cand_puts
                 break
-        ch0 = tk.option_chain(ladder_exp)
         lo_k, hi_k = spot * 0.88, spot * 1.12
-        c0 = ch0.calls[(ch0.calls["strike"] >= lo_k) & (ch0.calls["strike"] <= hi_k)]
-        p0 = ch0.puts[(ch0.puts["strike"] >= lo_k) & (ch0.puts["strike"] <= hi_k)]
+        c0 = ch0_calls[(ch0_calls["strike"] >= lo_k) & (ch0_calls["strike"] <= hi_k)]
+        p0 = ch0_puts[(ch0_puts["strike"] >= lo_k) & (ch0_puts["strike"] <= hi_k)]
         c_map = {float(r["strike"]): r for _, r in c0.iterrows()}
         p_map = {float(r["strike"]): r for _, r in p0.iterrows()}
         strikes0 = sorted(set(list(c_map) + list(p_map)))
@@ -206,6 +415,7 @@ def _analyze_symbol(symbol: str) -> dict[str, Any]:
             })
     except Exception:
         pass
+
     return {
         "symbol": symbol,
         "spot": round(spot, 2),
@@ -238,9 +448,26 @@ def fetch_options_flow(symbol: str = "SPY") -> dict[str, Any]:
         hit = _CACHE.get(symbol)
         if hit and now - hit[0] < _CACHE_TTL:
             return hit[1]
-    data = _analyze_symbol(symbol)
+
+    errors = []
+    data = None
+    for label, provider_fn in _PROVIDERS:
+        try:
+            spot, chg, chains = provider_fn(symbol)
+            data = _compute_metrics(symbol, spot, chg, chains)
+            data["source"] = (
+                f"{label} option chains (real volume / OI / IV)" if label != "Nasdaq"
+                else f"{label} option chains (real volume / OI -- IV/GEX unavailable on this fallback tier)"
+            )
+            break
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+
+    if data is None:
+        raise RuntimeError("All option data sources failed -- " + " | ".join(errors))
+
     data["symbols"] = FLOW_SYMBOLS
-    data["source"] = "Yahoo Finance option chains (real volume / OI / IV)"
     with _CACHE_LOCK:
         _CACHE[symbol] = (now, data)
     return data
