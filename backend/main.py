@@ -1112,7 +1112,12 @@ def api_admin_delete_user(user_id: int, admin: User = Depends(require_admin), db
 def root():
     index_file = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index_file):
-        return FileResponse(index_file)
+        # This SPA ships fixes via frequent deploys; without an explicit
+        # no-cache directive, browsers (and Render's edge) will happily keep
+        # serving a stale index.html for hours, silently masking every fix
+        # pushed after the page was first cached (missing tabs, old auth
+        # flow, "no data available" placeholders from an old payload shape).
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache, must-revalidate"})
     return {"status": "AlphaFinder Pro API running", "docs": "/docs"}
 
 
