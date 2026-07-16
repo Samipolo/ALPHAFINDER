@@ -1,17 +1,23 @@
 """
 Forex Factory calendar service.
 Fetches recent macro events and maps them onto the dashboard economic fields.
+
+Uses Forex Factory's own public JSON widget feed (nfs.faireconomy.media)
+instead of scraping forexfactory.com/calendar directly. The HTML calendar
+page sits behind Cloudflare bot protection that silently blocks/empties
+requests from datacenter IP ranges (Render included) -- it returns 200 with
+zero parseable rows rather than an error, so the scraper looked "successful"
+while quietly delivering nothing. The JSON feed is the same data Forex
+Factory itself serves to embeddable calendar widgets and isn't behind that
+wall.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from datetime import datetime, timedelta
 from typing import Optional
-
-from bs4 import BeautifulSoup
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -24,7 +30,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "ff_cal.json")
 CACHE_TTL = 60
 
 CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"}
-BASE_URL = "https://www.forexfactory.com/calendar"
+FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 
 def _load_cache() -> Optional[list]:
@@ -50,7 +56,7 @@ def _session():
     return build_session()
 
 
-def _clean_num(text: str):
+def _clean_num(text):
     if text is None:
         return None
     value = (
@@ -79,11 +85,11 @@ def _map_field(name: str):
     return None
 
 
-def _impact_score(cell) -> str:
-    html = cell.decode_contents() if cell else ""
-    if "impact-red" in html:
+def _impact_from_label(label) -> str:
+    lowered = (label or "").strip().lower()
+    if lowered == "high":
         return "3"
-    if "impact-ora" in html or "impact-yel" in html:
+    if lowered == "medium":
         return "2"
     return "1"
 
@@ -94,101 +100,49 @@ def fetch_forexfactory_calendar(days_back: int = 7) -> list:
         print("[FFCal] Returning cached calendar")
         return cached
 
-    print("[FFCal] Fetching Forex Factory calendar...")
-    today = datetime.utcnow().date()
-    wanted = set()
-    for offset in range(days_back + 1):
-        day = today - timedelta(days=offset)
-        wanted.add(day.strftime("%a%b%d").lower())
-        wanted.add(f"{day.strftime('%a')}{day.strftime('%b')}{day.day}".lower())
+    print("[FFCal] Fetching Forex Factory calendar (public JSON feed)...")
+    cutoff = datetime.utcnow().date() - timedelta(days=days_back)
 
     try:
         session = _session()
-        response = session.get(BASE_URL, timeout=20)
+        response = session.get(FEED_URL, timeout=15)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, "lxml")
-        rows = soup.select("tr.calendar__row")
+        raw = response.json()
+        if not isinstance(raw, list):
+            raise ValueError("unexpected feed shape")
 
         events = []
-        current_day = ""
-        for row in rows:
-            classes = row.get("class", [])
-            if "calendar__row--day-breaker" in classes:
-                text = row.get_text(" ", strip=True)
-                current_day = re.sub(r"[^A-Za-z0-9]", "", text).lower()
-                continue
-
-            date_cell = row.select_one("td.calendar__date")
-            if date_cell:
-                current_day = re.sub(r"[^A-Za-z0-9]", "", date_cell.get_text(" ", strip=True)).lower()
-
-            if current_day and current_day not in wanted:
-                continue
-
-            currency = row.select_one("td.calendar__currency")
-            event = row.select_one("td.calendar__event")
-            impact = row.select_one("td.calendar__impact")
-            actual = row.select_one("td.calendar__actual")
-            forecast = row.select_one("td.calendar__forecast")
-            previous = row.select_one("td.calendar__previous")
-            time_cell = row.select_one("td.calendar__time")
-
-            cur = currency.get_text(strip=True) if currency else ""
-            name = event.get_text(" ", strip=True) if event else ""
+        for item in raw:
+            cur = (item.get("country") or "").strip().upper()
+            name = (item.get("title") or "").strip()
             if cur not in CURRENCIES or not name:
                 continue
-
             field = _map_field(name)
             if not field:
+                continue
+
+            date_str = item.get("date") or ""
+            event_dt = None
+            try:
+                event_dt = datetime.fromisoformat(date_str)
+            except ValueError:
+                pass
+            if event_dt and event_dt.date() < cutoff:
                 continue
 
             events.append(
                 {
                     "currency": cur,
                     "name": name,
-                    "impact": _impact_score(impact),
-                    "actual": _clean_num(actual.get_text(" ", strip=True) if actual else ""),
-                    "forecast": _clean_num(forecast.get_text(" ", strip=True) if forecast else ""),
-                    "previous": _clean_num(previous.get_text(" ", strip=True) if previous else ""),
-                    "datetime": time_cell.get_text(" ", strip=True) if time_cell else "",
+                    "impact": _impact_from_label(item.get("impact")),
+                    "actual": _clean_num(item.get("actual")),
+                    "forecast": _clean_num(item.get("forecast")),
+                    "previous": _clean_num(item.get("previous")),
+                    "datetime": event_dt.strftime("%I:%M%p").lstrip("0").lower() if event_dt else "",
                     "field": field,
                     "source": "Forex Factory",
                 }
             )
-
-        if not events:
-            print("[FFCal] Filtered day match returned no events, retrying without day gate")
-            for row in rows:
-                currency = row.select_one("td.calendar__currency")
-                event = row.select_one("td.calendar__event")
-                impact = row.select_one("td.calendar__impact")
-                actual = row.select_one("td.calendar__actual")
-                forecast = row.select_one("td.calendar__forecast")
-                previous = row.select_one("td.calendar__previous")
-                time_cell = row.select_one("td.calendar__time")
-
-                cur = currency.get_text(strip=True) if currency else ""
-                name = event.get_text(" ", strip=True) if event else ""
-                if cur not in CURRENCIES or not name:
-                    continue
-
-                field = _map_field(name)
-                if not field:
-                    continue
-
-                events.append(
-                    {
-                        "currency": cur,
-                        "name": name,
-                        "impact": _impact_score(impact),
-                        "actual": _clean_num(actual.get_text(" ", strip=True) if actual else ""),
-                        "forecast": _clean_num(forecast.get_text(" ", strip=True) if forecast else ""),
-                        "previous": _clean_num(previous.get_text(" ", strip=True) if previous else ""),
-                        "datetime": time_cell.get_text(" ", strip=True) if time_cell else "",
-                        "field": field,
-                        "source": "Forex Factory",
-                    }
-                )
 
         print(f"[FFCal] Got {len(events)} events")
         if events:

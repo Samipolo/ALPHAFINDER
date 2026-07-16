@@ -253,6 +253,26 @@ _PROVIDERS: list[tuple[str, Any]] = [
 ]
 
 
+def fetch_symbol_chains(symbol: str) -> tuple[float, float, list[tuple[str, pd.DataFrame, pd.DataFrame]], str]:
+    """Try Yahoo -> Cboe -> Nasdaq in order for one symbol's option chains.
+
+    Shared by fetch_options_flow (this module) and services.options_gex, so
+    both the Options Desk tab and the header's Options GEX summary get the
+    same real-data resilience instead of each hand-rolling its own
+    Yahoo-only fetch that dies the moment Yahoo rate-limits the server.
+    Returns (spot, change_pct, chains, provider_label) or raises if every
+    provider failed.
+    """
+    errors = []
+    for label, provider_fn in _PROVIDERS:
+        try:
+            spot, chg, chains = provider_fn(symbol)
+            return spot, chg, chains, label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    raise RuntimeError("All option data sources failed -- " + " | ".join(errors))
+
+
 # _____________________________________________________________
 #  Provider-agnostic metrics computation (unchanged math, now fed by
 #  whichever source actually returned live data)
@@ -449,23 +469,12 @@ def fetch_options_flow(symbol: str = "SPY") -> dict[str, Any]:
         if hit and now - hit[0] < _CACHE_TTL:
             return hit[1]
 
-    errors = []
-    data = None
-    for label, provider_fn in _PROVIDERS:
-        try:
-            spot, chg, chains = provider_fn(symbol)
-            data = _compute_metrics(symbol, spot, chg, chains)
-            data["source"] = (
-                f"{label} option chains (real volume / OI / IV)" if label != "Nasdaq"
-                else f"{label} option chains (real volume / OI -- IV/GEX unavailable on this fallback tier)"
-            )
-            break
-        except Exception as exc:
-            errors.append(f"{label}: {exc}")
-            continue
-
-    if data is None:
-        raise RuntimeError("All option data sources failed -- " + " | ".join(errors))
+    spot, chg, chains, label = fetch_symbol_chains(symbol)
+    data = _compute_metrics(symbol, spot, chg, chains)
+    data["source"] = (
+        f"{label} option chains (real volume / OI / IV)" if label != "Nasdaq"
+        else f"{label} option chains (real volume / OI -- IV/GEX unavailable on this fallback tier)"
+    )
 
     data["symbols"] = FLOW_SYMBOLS
     with _CACHE_LOCK:

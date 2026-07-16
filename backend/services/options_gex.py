@@ -14,6 +14,7 @@ import yfinance as yf
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import CACHE_DIR
 from services.net_utils import disable_dead_proxy_env
+from services.options_flow import fetch_symbol_chains
 
 
 CACHE_FILE = os.path.join(CACHE_DIR, "options_gex.json")
@@ -122,16 +123,6 @@ def _expiry_days(expiry: str) -> int:
         return 0
 
 
-def _price_snapshot(ticker: yf.Ticker) -> tuple[float, float]:
-    hist = ticker.history(period="5d", interval="1d", auto_adjust=False)
-    close = hist["Close"].dropna() if "Close" in hist else []
-    if len(close) == 0:
-        return 0.0, 0.0
-    spot = float(close.iloc[-1])
-    prev = float(close.iloc[-2]) if len(close) >= 2 else spot
-    change_pct = ((spot - prev) / prev * 100.0) if prev else 0.0
-    return spot, change_pct
-
 
 def _max_pain(calls_df, puts_df, strikes: list[float]) -> float | None:
     best_strike = None
@@ -215,9 +206,12 @@ def _build_strike_profile(
 def _is_real_chart_row(row: dict[str, Any]) -> bool:
     if not isinstance(row, dict):
         return False
-    if row.get("is_real") is False or row.get("fallback_used"):
+    if row.get("is_real") is False:
         return False
-    if row.get("source") != "Yahoo Finance options chain via yfinance":
+    # Accept any of the fallback providers' labels (they all end in "option
+    # chains") -- Cboe/Nasdaq-sourced rows are real market data too, just not
+    # from the primary provider, so "fallback_used" no longer disqualifies.
+    if not str(row.get("source", "")).endswith("option chains"):
         return False
     if not row.get("front_expiry"):
         return False
@@ -237,25 +231,24 @@ def _is_real_chart_row(row: dict[str, Any]) -> bool:
 
 def _analyze_symbol(asset: dict[str, str]) -> dict[str, Any] | None:
     symbol = asset["symbol"]
-    ticker = yf.Ticker(symbol)
-    expiries = list(ticker.options or [])
-    if not expiries:
+    try:
+        spot, change_pct, chains, source_label = fetch_symbol_chains(symbol)
+    except Exception as exc:
+        print(f"[OptionsGEX] {symbol} all sources failed: {exc}")
+        return None
+    if spot <= 0 or not chains:
         return None
 
-    chosen_expiries: list[str] = []
-    for expiry in expiries:
-        days = _expiry_days(expiry)
-        if days > 45:
+    chosen: list[tuple[str, Any, Any]] = []
+    for expiry, calls, puts in chains:
+        if _expiry_days(expiry) > 45:
             continue
-        chosen_expiries.append(expiry)
-        if len(chosen_expiries) >= 3:
+        chosen.append((expiry, calls, puts))
+        if len(chosen) >= 3:
             break
-    if not chosen_expiries:
-        chosen_expiries = list(expiries[:1])
+    if not chosen:
+        chosen = chains[:1]
 
-    spot, change_pct = _price_snapshot(ticker)
-    if spot <= 0:
-        return None
     fetched_at = datetime.utcnow().isoformat() + "Z"
 
     total_call_gex = 0.0
@@ -267,13 +260,12 @@ def _analyze_symbol(asset: dict[str, str]) -> dict[str, Any] | None:
     strike_exposure: dict[float, float] = {}
     strike_pool: set[float] = set()
 
-    for expiry in chosen_expiries:
-        chain = ticker.option_chain(expiry)
+    for expiry, calls, puts in chosen:
         days = max(_expiry_days(expiry), 1)
         t = days / 365.0
 
-        call_gex, call_oi, call_volume, call_rows = _contract_gex(chain.calls, spot, t, 1)
-        put_gex, put_oi, put_volume, put_rows = _contract_gex(chain.puts, spot, t, -1)
+        call_gex, call_oi, call_volume, call_rows = _contract_gex(calls, spot, t, 1)
+        put_gex, put_oi, put_volume, put_rows = _contract_gex(puts, spot, t, -1)
 
         total_call_gex += call_gex
         total_put_gex += put_gex
@@ -286,20 +278,19 @@ def _analyze_symbol(asset: dict[str, str]) -> dict[str, Any] | None:
             strike_exposure[strike] = strike_exposure.get(strike, 0.0) + gex
             strike_pool.add(strike)
 
-    near_expiry = chosen_expiries[0]
-    near_chain = ticker.option_chain(near_expiry)
+    near_expiry, near_calls, near_puts = chosen[0]
     strikes = sorted({float(x) for x in strike_pool})[:]
-    max_pain = _max_pain(near_chain.calls, near_chain.puts, strikes) if strikes else None
+    max_pain = _max_pain(near_calls, near_puts, strikes) if strikes else None
 
     call_wall = None
-    if near_chain.calls is not None and not near_chain.calls.empty:
+    if near_calls is not None and not near_calls.empty:
         call_wall = float(
-            near_chain.calls.sort_values(by="openInterest", ascending=False).iloc[0]["strike"]
+            near_calls.sort_values(by="openInterest", ascending=False).iloc[0]["strike"]
         )
     put_wall = None
-    if near_chain.puts is not None and not near_chain.puts.empty:
+    if near_puts is not None and not near_puts.empty:
         put_wall = float(
-            near_chain.puts.sort_values(by="openInterest", ascending=False).iloc[0]["strike"]
+            near_puts.sort_values(by="openInterest", ascending=False).iloc[0]["strike"]
         )
 
     net_gex = total_call_gex + total_put_gex
@@ -330,8 +321,8 @@ def _analyze_symbol(asset: dict[str, str]) -> dict[str, Any] | None:
         "proxy": asset["proxy"],
         "price": round(spot, 4),
         "change_pct": round(change_pct, 2),
-        "expiries": chosen_expiries,
-        "expiries_available": len(expiries),
+        "expiries": [e for e, _, _ in chosen],
+        "expiries_available": len(chains),
         "front_expiry": near_expiry,
         "call_gex": _format_gex(total_call_gex),
         "put_gex": _format_gex(total_put_gex),
@@ -350,11 +341,11 @@ def _analyze_symbol(asset: dict[str, str]) -> dict[str, Any] | None:
             for strike, gex in top_strikes
         ],
         "strike_profile": strike_profile,
-        "source": "Yahoo Finance options chain via yfinance",
+        "source": f"{source_label} option chains",
         "method": "Approx. gamma exposure from public option chain OI and implied volatility",
         "as_of": fetched_at,
         "is_real": True,
-        "fallback_used": False,
+        "fallback_used": source_label != "Yahoo Finance",
     }
 
 
